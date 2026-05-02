@@ -28,19 +28,34 @@ else
   BUN_PATH="$(command -v bun || echo "$HOME/.bun/bin/bun")"
 fi
 
+# OS detection — Linux uses systemd --user, macOS uses launchctl.
+OS=$(uname -s)
+SERVICE_SRC="$PULSE_DIR/$PLIST_NAME.service"
+SYSTEMD_SERVICE_DIR="$HOME/.config/systemd/user"
+SERVICE_DST="$SYSTEMD_SERVICE_DIR/$PLIST_NAME.service"
+
 case "$1" in
   start)
-    if [ ! -f "$PLIST_DST" ]; then
-      # Substitute __HOME__ + __BUN_PATH__ placeholders (public template);
-      # no-op on plists that already have literal paths.
-      sed -e "s|__HOME__|$HOME|g" -e "s|__BUN_PATH__|$BUN_PATH|g" "$PLIST_SRC" > "$PLIST_DST"
+    if [ "$OS" = "Linux" ]; then
+      systemctl --user start "$PLIST_NAME"
+      echo "PAI Pulse started"
+    else
+      if [ ! -f "$PLIST_DST" ]; then
+        # Substitute __HOME__ + __BUN_PATH__ placeholders (public template);
+        # no-op on plists that already have literal paths.
+        sed -e "s|__HOME__|$HOME|g" -e "s|__BUN_PATH__|$BUN_PATH|g" "$PLIST_SRC" > "$PLIST_DST"
+      fi
+      launchctl load "$PLIST_DST" 2>/dev/null
+      echo "PAI Pulse started"
     fi
-    launchctl load "$PLIST_DST" 2>/dev/null
-    echo "PAI Pulse started"
     ;;
 
   stop)
-    launchctl unload "$PLIST_DST" 2>/dev/null
+    if [ "$OS" = "Linux" ]; then
+      systemctl --user stop "$PLIST_NAME" 2>/dev/null
+    else
+      launchctl unload "$PLIST_DST" 2>/dev/null
+    fi
     if [ -f "$PID_FILE" ]; then
       PID=$(cat "$PID_FILE")
       kill "$PID" 2>/dev/null
@@ -57,16 +72,20 @@ case "$1" in
     ;;
 
   status)
-    if [ -f "$PID_FILE" ]; then
-      PID=$(cat "$PID_FILE")
-      if ps -p "$PID" > /dev/null 2>&1; then
-        UPTIME=$(ps -p "$PID" -o etime= | xargs)
-        echo "PAI Pulse: RUNNING (PID $PID, uptime $UPTIME)"
-      else
-        echo "PAI Pulse: DEAD (stale PID $PID)"
-      fi
+    if [ "$OS" = "Linux" ]; then
+      systemctl --user status "$PLIST_NAME"
     else
-      echo "PAI Pulse: NOT RUNNING (no PID file)"
+      if [ -f "$PID_FILE" ]; then
+        PID=$(cat "$PID_FILE")
+        if ps -p "$PID" > /dev/null 2>&1; then
+          UPTIME=$(ps -p "$PID" -o etime= | xargs)
+          echo "PAI Pulse: RUNNING (PID $PID, uptime $UPTIME)"
+        else
+          echo "PAI Pulse: DEAD (stale PID $PID)"
+        fi
+      else
+        echo "PAI Pulse: NOT RUNNING (no PID file)"
+      fi
     fi
 
     if [ -f "$STATE_FILE" ]; then
@@ -86,19 +105,37 @@ case "$1" in
   install)
     mkdir -p "$PULSE_DIR/state" "$PULSE_DIR/logs"
 
-    # Cleanup any prior pulse before installing fresh — prevents the stale-PID
-    # / unbound-port half-dead state where a previous launchd-managed pulse is
-    # alive with open fds but never bound :31337.
-    if [ -f "$PLIST_DST" ]; then
-      launchctl unload "$PLIST_DST" 2>/dev/null || true
-    fi
-    pkill -9 -f "bun.*pulse.ts" 2>/dev/null || true
-    sleep 1
+    if [ "$OS" = "Linux" ]; then
+      mkdir -p "$SYSTEMD_SERVICE_DIR"
+      # Kill any prior pulse before installing fresh — prevents the stale-PID
+      # / unbound-port half-dead state where a previous service-managed pulse
+      # is alive with open fds but never bound :31337.
+      systemctl --user stop "$PLIST_NAME" 2>/dev/null || true
+      pkill -9 -f "bun.*pulse.ts" 2>/dev/null || true
+      sleep 1
+      # Substitute __HOME__ + __BUN_PATH__ placeholders (public template);
+      # no-op on service files that already have literal paths.
+      sed -e "s|__HOME__|$HOME|g" -e "s|__BUN_PATH__|$BUN_PATH|g" "$SERVICE_SRC" > "$SERVICE_DST"
+      # Ensure user services survive logout/reboot (no-op if already enabled)
+      loginctl enable-linger "$USER" 2>/dev/null || true
+      systemctl --user daemon-reload
+      systemctl --user enable "$PLIST_NAME"
+      systemctl --user start "$PLIST_NAME"
+    else
+      # Cleanup any prior pulse before installing fresh — prevents the stale-PID
+      # / unbound-port half-dead state where a previous launchd-managed pulse is
+      # alive with open fds but never bound :31337.
+      if [ -f "$PLIST_DST" ]; then
+        launchctl unload "$PLIST_DST" 2>/dev/null || true
+      fi
+      pkill -9 -f "bun.*pulse.ts" 2>/dev/null || true
+      sleep 1
 
-    # Substitute __HOME__ + __BUN_PATH__ placeholders (public template);
-    # no-op on plists that already have literal paths.
-    sed -e "s|__HOME__|$HOME|g" -e "s|__BUN_PATH__|$BUN_PATH|g" "$PLIST_SRC" > "$PLIST_DST"
-    launchctl load "$PLIST_DST"
+      # Substitute __HOME__ + __BUN_PATH__ placeholders (public template);
+      # no-op on plists that already have literal paths.
+      sed -e "s|__HOME__|$HOME|g" -e "s|__BUN_PATH__|$BUN_PATH|g" "$PLIST_SRC" > "$PLIST_DST"
+      launchctl load "$PLIST_DST"
+    fi
 
     # Verify pulse actually binds :31337 within 10s. Fail loud if not — prior
     # behavior was silent success even when the daemon never came up.
@@ -112,14 +149,19 @@ case "$1" in
       fi
     done
 
-    echo "ERROR: PAI Pulse plist installed but port 31337 did not bind within 10s." >&2
+    echo "ERROR: PAI Pulse installed but port 31337 did not bind within 10s." >&2
     echo "  Check: tail -50 $PULSE_DIR/logs/pulse-stderr.log" >&2
     exit 1
     ;;
 
   uninstall)
-    launchctl unload "$PLIST_DST" 2>/dev/null
-    rm -f "$PLIST_DST"
+    if [ "$OS" = "Linux" ]; then
+      systemctl --user disable --now "$PLIST_NAME" 2>/dev/null
+      rm -f "$SERVICE_DST"
+    else
+      launchctl unload "$PLIST_DST" 2>/dev/null
+      rm -f "$PLIST_DST"
+    fi
     echo "PAI Pulse uninstalled"
     ;;
 
