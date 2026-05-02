@@ -234,32 +234,51 @@ export async function runValidation(state: InstallState, emit?: EngineEventHandl
     critical: false,
   });
 
-  // 7b. Pulse launchd plist present (auto-start on login)
-  const pulsePlist = join(homedir(), "Library", "LaunchAgents", "com.pai.pulse.plist");
-  const pulsePlistInstalled = existsSync(pulsePlist);
-  checks.push({
-    name: "Pulse launchd agent",
-    passed: pulsePlistInstalled,
-    detail: pulsePlistInstalled
+  // 7b. Pulse auto-start service present (launchd on macOS, systemd on Linux)
+  let pulseServiceInstalled = false;
+  let pulseServiceDetail = "";
+  if (process.platform === "darwin") {
+    const pulsePlist = join(homedir(), "Library", "LaunchAgents", "com.pai.pulse.plist");
+    pulseServiceInstalled = existsSync(pulsePlist);
+    pulseServiceDetail = pulseServiceInstalled
       ? "Installed at ~/Library/LaunchAgents/com.pai.pulse.plist"
-      : "Not installed — Pulse will not auto-start on login",
+      : "Not installed — Pulse will not auto-start on login";
+  } else {
+    const pulseUnit = join(homedir(), ".config", "systemd", "user", "com.pai.pulse.service");
+    pulseServiceInstalled = existsSync(pulseUnit);
+    pulseServiceDetail = pulseServiceInstalled
+      ? "Installed at ~/.config/systemd/user/com.pai.pulse.service"
+      : "Not installed — Pulse will not auto-start on login";
+  }
+  checks.push({
+    name: "Pulse auto-start service",
+    passed: pulseServiceInstalled,
+    detail: pulseServiceDetail,
     critical: false,
   });
 
-  // 8. Zsh alias configured
-  const zshrcPath = join(homedir(), ".zshrc");
+  // 8. Shell alias configured (.zshrc, .bashrc, or .profile)
+  const shellRcFiles = [".zshrc", ".bashrc", ".profile"];
   let aliasConfigured = false;
-  if (existsSync(zshrcPath)) {
-    try {
-      const zshContent = readFileSync(zshrcPath, "utf-8");
-      aliasConfigured = zshContent.includes("# PAI alias") && zshContent.includes("alias pai=");
-    } catch {}
+  let aliasFoundIn = "";
+  for (const rc of shellRcFiles) {
+    const rcPath = join(homedir(), rc);
+    if (existsSync(rcPath)) {
+      try {
+        const rcContent = readFileSync(rcPath, "utf-8");
+        if (rcContent.includes("# PAI alias") && rcContent.includes("alias pai=")) {
+          aliasConfigured = true;
+          aliasFoundIn = rc;
+          break;
+        }
+      } catch {}
+    }
   }
 
   checks.push({
     name: "Shell alias (pai)",
     passed: aliasConfigured,
-    detail: aliasConfigured ? "Configured in .zshrc" : "Not found — run: source ~/.zshrc",
+    detail: aliasConfigured ? `Configured in ~/${aliasFoundIn}` : "Not found — run: source ~/.<shell>rc",
     critical: true,
   });
 
