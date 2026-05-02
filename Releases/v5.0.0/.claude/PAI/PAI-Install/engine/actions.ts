@@ -1634,8 +1634,11 @@ async function installPulse(paiDir: string, emit: EngineEventHandler): Promise<b
 async function reloadPulse(paiDir: string, emit: EngineEventHandler): Promise<void> {
   const manageScript = join(paiDir, "PAI", "PULSE", "manage.sh");
   if (!existsSync(manageScript)) return;
-  const homeLaunchAgent = join(homedir(), "Library", "LaunchAgents", "com.pai.pulse.plist");
-  if (!existsSync(homeLaunchAgent)) return;
+  // Check that Pulse is installed for the current platform before reloading.
+  const serviceInstalled = process.platform === "darwin"
+    ? existsSync(join(homedir(), "Library", "LaunchAgents", "com.pai.pulse.plist"))
+    : existsSync(join(homedir(), ".config", "systemd", "user", "com.pai.pulse.service"));
+  if (!serviceInstalled) return;
   await emit({ event: "message", content: "Reloading Pulse to pick up new voice configuration..." });
   await new Promise<void>((resolve) => {
     const child = spawn("bash", [manageScript, "restart"], {
