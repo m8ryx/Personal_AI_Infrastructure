@@ -54,6 +54,14 @@ const KNOWLEDGE_DOMAINS = ["People", "Companies", "Ideas", "Research"];
 const SKIP_FILES = new Set(["_index.md", "_schema.md", "_log.md", "README.md"]);
 const SKIP_DIRS = new Set(["_archive", "_embeddings", "_harvest-queue", "_drafts"]);
 const TAG_GROUP_CAP = 50;
+
+// Tag values that mark the ABSENCE of a topic, not a topic. The schema requires a
+// `tags` key on every note, so notes with no tags carry a sentinel instead
+// (KnowledgeSchema.ts backfill, MemorySystem.ts note template); MigrateApprove.ts
+// stamps provenance the same way. Grouping on these links every untagged note to
+// every other one — "has no tags" becomes the strongest edge in the graph, and the
+// communities/bridges computed on top are artifacts of the sentinel.
+const NON_TOPICAL_TAGS = new Set(["untagged", "migrated"]);
 const BETWEENNESS_MAX_NODES = 2500; // guard: betweenness is O(VE), skip on huge graphs
 
 // ============================================================================
@@ -385,6 +393,7 @@ function buildGraph(raws: Raw[], layer: EdgeLayer = "declared"): { graph: Graph;
     tagIndex.get(t)!.push(node.id);
   }
   for (const [tag, ids] of tagIndex) {
+    if (NON_TOPICAL_TAGS.has(tag.toLowerCase())) continue;
     if (ids.length < 2) continue;
     const g = ids.length > TAG_GROUP_CAP ? ids.slice(0, TAG_GROUP_CAP) : ids;
     for (let i = 0; i < g.length; i++)
@@ -463,8 +472,16 @@ function computePatterns(graph: Graph) {
   let bridges: any[] = [];
   if (betweenness) {
     bridges = [...allNodes]
-      .filter((n) => degree.get(n)! <= medianDeg && degree.get(n)! > 0)
-      .sort((a, b) => (betweenness!.get(b) || 0) - (betweenness!.get(a) || 0))
+      // Betweenness IS the gate: a bridge is a node that lies on paths between others,
+      // and degree cannot express that. The previous filter used median degree alone, so
+      // on a sparse graph it admitted only leaves — which have betweenness 0 by
+      // definition — while excluding every node that actually brokers. Low degree stays
+      // as the tiebreak it was meant to be: among real connectors, the less central ones
+      // are the more interesting.
+      .filter((n) => (betweenness!.get(n) || 0) > 0)
+      .sort((a, b) =>
+        ((betweenness!.get(b) || 0) - (betweenness!.get(a) || 0)) ||
+        (degree.get(a)! - degree.get(b)!))
       .slice(0, 15)
       .map((n) => ({ id: n, title: graph.getNodeAttribute(n, "title"), silo: graph.getNodeAttribute(n, "silo"), betweenness: betweenness!.get(n) || 0, degree: degree.get(n)! }));
   }
@@ -526,7 +543,8 @@ function emit(graph: Graph, edges: MemEdge[], p: ReturnType<typeof computePatter
 
   L.push(`## Bridges (high betweenness, low degree — the secret connectors)`, ``);
   if (p.betweennessComputed && p.bridges.length) for (const b of p.bridges) L.push(`- **${b.title}** \`${b.id}\` — ${b.silo}, degree ${b.degree}`);
-  else L.push(`_Betweenness skipped (graph > ${BETWEENNESS_MAX_NODES} nodes) or unavailable — bridge detection deferred to the filtered-graph slice._`);
+  else if (!p.betweennessComputed) L.push(`_Betweenness not computed (graph > ${BETWEENNESS_MAX_NODES} nodes, or the metrics package is unavailable)._`);
+  else L.push(`_Betweenness computed, but every node scored 0 — no node lies on a path between two others, so the graph has no brokers to report._`);
   L.push(``);
 
   L.push(`## Orphans (unconnected — captured then abandoned)`, ``);
